@@ -1,0 +1,14 @@
+venv/
+.venv/
+data/
+weights/
+test_photos/
+test_family/
+test_samples/
+__pycache__/
+*.pt
+*.pth
+.streamlit/
+venv/
+weights/
+*.pt
