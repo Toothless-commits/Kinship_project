@@ -6,227 +6,222 @@
 [![FaceNet](https://img.shields.io/badge/Backbone-InceptionResnetV1-blue?style=for-the-badge)](https://github.com/timesler/facenet-pytorch)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-An end-to-end deep learning framework for **Tri-Subject Kinship Recognition** $(Father, Mother, Child)$ and **Facial Phenotype Attribution**. 
+An end-to-end deep learning framework for **Tri-Subject Kinship Verification** $(Father, Mother, Child)$, **1-to-$N$ Biological Parent Retrieval**, and **Landmark-Guided Facial Phenotype Attribution**.
 
-Unlike conventional pairwise kinship verification ($F-C$ or $M-C$) which overlooks the joint genetic contribution of both parents, this system models the full biological triad using **InceptionResnetV1 (VGGFace2)**, **Bilinear Relational Genetic Fusion (2560 dims)**, **MTCNN landmark-guided facial trait decomposition**, and a **vectorized 1-to-$N$ gallery search engine**.
+Unlike conventional pairwise kinship verification ($F\text{-}C$ or $M\text{-}C$) that ignores the joint contribution of both parents, this system evaluates the full nuclear triad using **InceptionResnetV1 (VGGFace2)**, **Order-Invariant Symmetric & Cosine Genetic Fusion (646 dims)**, **Test-Time Augmentation (TTA)**, and a **live Parent Gallery Manager** with multi-photo parent prototypes.
 
 ---
 
 ## 🌟 Key Features
 
-- **Tri-Subject Joint Modeling**: Evaluates the complete $(Father, Mother, Child)$ triad simultaneously, modeling how combined parental features synthesize in the offspring.
-- **Bilinear Genetic Feature Fusion**: Synthesizes 512-dimensional $L_2$-normalized deep facial embeddings through absolute differences, Hadamard products, and mid-parent target deviations into a rich 2560-dimensional representation.
-- **Landmark-Guided Phenotype Attribution**: Leverages MTCNN 5-point facial landmarks to dynamically isolate:
+- **Symmetric Tri-Subject Modeling**: Evaluates $(Father, Mother, Child)$ simultaneously using parent-order-invariant Mendelian ($\min/\max$) and mid-parent hypersphere fusion. Swapping Father and Mother inputs yields the exact same prediction.
+- **Compact Anti-Overfitting Architecture**: Combines 6 parameter-free 512-d cosine similarity features with a shared 128-d `LayerNorm` + `GELU` bottleneck (646 fused dimensions total) for strong generalization on family-disjoint splits.
+- **Open-Wedge Triad Mining**: Extracts authentic $(Parent_1, Parent_2, Child)$ open wedges from FIW relationship graphs instead of noisy 3-cliques (such as sibling triangles).
+- **Test-Time Augmentation (TTA)**: Averages $L_2$-normalized embeddings across original and horizontally flipped face crops during verification, evaluation, and gallery indexing.
+- **Landmark-Guided Phenotype Attribution**: Uses MTCNN 5-point facial landmarks to dynamically isolate and compare:
   - 👁️ **Eyes** (ocular midpoint & inter-ocular span)
   - 👃 **Nose** (nasal tip & bridge)
   - 👄 **Mouth & Lips** (oral commissures)
   - 💇 **Hair & Forehead** (supra-orbital band)
-  - ✨ **Skin Complexion** (malar/cheek tone in perceptual YCbCr space)
-- **1-to-$N$ Parent Retrieval Gallery**: Fast, vectorized cosine-and-MLP ranking to retrieve and rank candidate biological parent couples for a queried child image from a gallery.
-- **Strict Family-Level Splitting & Hard Negative Mining**: Zero identity/family leakage across train, validation, and test splits, combined with multi-type negative mining (`wrong_father`, `wrong_mother`, `wrong_both`).
-- **Interactive Streamlit Web Dashboard**: Dual-mode graphical interface for 1-to-1 Triplet Verification with visual trait inheritance breakdown and 1-to-$N$ Parent Search.
+  - ✨ **Skin Complexion** (cheek patches in perceptual $\text{YCbCr}$ space)
+- **Live Parent Gallery Manager & 1-to-$N$ Search**: Enroll custom parent couples directly in the browser with **1–3 photos per parent** (averaged into normalized identity prototypes), filter searches between **Custom Gallery** and **FIW Dataset**, and rank candidates in a single vectorized GPU pass.
 
 ---
 
-## 📐 Mathematical Formulation & Architecture
+## 📐 Architecture & Mathematical Formulation
 
-```
-Father Image (160x160) ──► [InceptionResnetV1] ──► feat_F (512-d) ──┐
-                                                                     │
-Mother Image (160x160) ──► [InceptionResnetV1] ──► feat_M (512-d) ──┼──► [Bilinear Genetic Fusion]
-                                                                     │          (2560-d)
-Child Image  (160x160) ──► [InceptionResnetV1] ──► feat_C (512-d) ──┘               │
-                                                                                    ▼
-                                                                           [Classifier MLP]
-                                                                        2560 -> 512 -> 128 -> 1
-                                                                                    │
-                                                                                    ▼
-                                                                        Kinship Probability [0, 1]
-```
+~~~text
+Father Image (160x160) ──► [InceptionResnetV1 + TTA] ──► f_F (512-d) ──┐
+                                                                       ├──► 6 Cosine Scalars (512-d) ──────────┐
+Mother Image (160x160) ──► [InceptionResnetV1 + TTA] ──► f_M (512-d) ──┼──► Shared Bottleneck (512 -> 128-d)   ├──► [Concat: 646-d]
+                                                                       │       └─► Symmetric Fusion (640-d) ───┘           │
+Child Image  (160x160) ──► [InceptionResnetV1 + TTA] ──► f_C (512-d) ──┘                                                   ▼
+                                                                                                                  [Classifier MLP]
+                                                                                                                    646 -> 64 -> 1
+                                                                                                                           │
+                                                                                                                           ▼
+                                                                                                               Kinship Probability [0, 1]
+~~~
 
-### 1. Bilinear Relational Genetic Fusion
+### 1. Parameter-Free 512-d Cosine Geometry
 
-Let $f_F, f_M, f_C \in \mathbb{R}^{512}$ denote $L_2$-normalized face embeddings extracted from the backbone for Father, Mother, and Child respectively. The genetic fusion layer computes:
+Let $f_F, f_M, f_C \in \mathbb{R}^{512}$ denote $L_2$-normalized TTA face embeddings and $\mu_{512} = \text{normalize}(f_F + f_M)$ be the unit-sphere mid-parent vector. Six scalar features capture direct angular kinship:
 
-$$\text{Diff}_{FC} = |f_F - f_C| \in \mathbb{R}^{512}$$
+- $\max(\cos_{FC}, \cos_{MC})$ and $\min(\cos_{FC}, \cos_{MC})$
+- $\cos(\mu_{512}, f_C)$ and $\cos(f_F, f_M)$
+- $\frac{\cos_{FC} + \cos_{MC}}{2}$ and $\vert{}\cos_{FC} - \cos_{MC}\vert{}$
 
-$$\text{Diff}_{MC} = |f_M - f_C| \in \mathbb{R}^{512}$$
+### 2. Symmetric 128-d Relational Fusion
 
-$$\text{Prod}_{FC} = f_F \odot f_C \in \mathbb{R}^{512}$$
+Each embedding passes through a shared projection $\phi: \mathbb{R}^{512} \to \mathbb{R}^{128}$ (`Linear -> LayerNorm -> GELU -> Dropout(0.35)` + $L_2$ normalization) to yield $p_F, p_M, p_C$ and $\mu_{128} = \text{normalize}(p_F + p_M)$:
 
-$$\text{Prod}_{MC} = f_M \odot f_C \in \mathbb{R}^{512}$$
+$$\text{Diff}_{\min} = \min(\vert{}p_F - p_C\vert{}, \vert{}p_M - p_C\vert{}), \quad \text{Diff}_{\max} = \max(\vert{}p_F - p_C\vert{}, \vert{}p_M - p_C\vert{})$$
 
-$$\mu_{parent} = \frac{f_F + f_M}{2}, \quad \text{Diff}_{midC} = |\mu_{parent} - f_C| \in \mathbb{R}^{512}$$
+$$\text{Prod}_{\max} = \max(p_F \odot p_C, p_M \odot p_C), \quad \text{Prod}_{\text{avg}} = \frac{1}{2}(p_F \odot p_C + p_M \odot p_C)$$
 
-The fused vector $\mathbf{z} \in \mathbb{R}^{2560}$ concatenates these components:
+$$\text{Diff}_{\text{mid}} = \vert{}\mu_{128} - p_C\vert{}$$
 
-$$\mathbf{z} = \Big[ \text{Diff}_{FC} \,\|\, \text{Diff}_{MC} \,\|\, \text{Prod}_{FC} \,\|\, \text{Prod}_{MC} \,\|\, \text{Diff}_{midC} \Big]$$
-
-### 2. Multi-Layer Classification Head
-
-$$\mathbf{h}_1 = \text{Dropout}_{0.4}\Big(\text{ReLU}\big(\text{BatchNorm1d}(\mathbf{W}_1 \mathbf{z} + \mathbf{b}_1)\big)\Big), \quad \mathbf{W}_1 \in \mathbb{R}^{512 \times 2560}$$
-
-$$\mathbf{h}_2 = \text{Dropout}_{0.3}\Big(\text{ReLU}\big(\text{BatchNorm1d}(\mathbf{W}_2 \mathbf{h}_1 + \mathbf{b}_2)\big)\Big), \quad \mathbf{W}_2 \in \mathbb{R}^{128 \times 512}$$
-
-$$\hat{y} = \sigma(\mathbf{W}_3 \mathbf{h}_2 + b_3), \quad \mathbf{W}_3 \in \mathbb{R}^{1 \times 128}$$
+Concatenating the 6 cosine scalars with these 5 symmetric 128-d vectors produces $\mathbf{z} \in \mathbb{R}^{646}$, passed through a regularized MLP (`646 -> 64 -> 1` with `LayerNorm`, `GELU`, and `Dropout(0.4)`).
 
 ### 3. Phenotype Attribution Scoring
 
-For structural traits (Eyes, Nose, Mouth, Hair), normalized embeddings $e_C, e_F, e_M$ of isolated crops are compared via cosine similarity scaled by temperature $\tau = 0.08$:
+For structural traits (Eyes, Nose, Mouth, Hair), normalized embeddings $e_C, e_F, e_M$ of isolated crops are compared via temperature-scaled cosine similarity ($\tau = 0.08$):
 
-$$P(\text{Father}) = \frac{\exp(\cos(e_C, e_F) / \tau)}{\exp(\cos(e_C, e_F) / \tau) + \exp(\cos(e_C, e_M) / \tau)}$$
-
-$$P(\text{Mother}) = 1.0 - P(\text{Father})$$
+$$P(\text{Father}) = \frac{\exp(\cos(e_C, e_F) / \tau)}{\exp(\cos(e_C, e_F) / \tau) + \exp(\cos(e_C, e_M) / \tau)}, \quad P(\text{Mother}) = 1.0 - P(\text{Father})$$
 
 For **Skin Complexion**, Euclidean distance $d_F, d_M$ in perceptual $\text{YCbCr}$ color space is computed on cheek patches:
 
-$$P_{skin}(\text{Father}) = \frac{d_F^{-1}}{d_F^{-1} + d_M^{-1}}, \quad P_{skin}(\text{Mother}) = 1.0 - P_{skin}(\text{Father})$$
+$$P_{\text{skin}}(\text{Father}) = \frac{d_F^{-1}}{d_F^{-1} + d_M^{-1}}, \quad P_{\text{skin}}(\text{Mother}) = 1.0 - P_{\text{skin}}(\text{Father})$$
+
+---
+
+## 📊 Benchmark Results (Family-Disjoint FIW Test Split)
+
+Evaluated with Test-Time Augmentation (TTA) on completely unseen families:
+
+| Benchmark | Metric | Score |
+| :--- | :--- | :--- |
+| **Validation** | Best Validation ROC-AUC | **0.8744** |
+| **Binary Verification (1-to-1)** | Test Accuracy | **67.97%** |
+| **Binary Verification (1-to-1)** | Test ROC-AUC | **0.7046** |
+| **Binary Verification (1-to-1)** | Kin Precision / F1-Score | **0.73 / 0.64** |
+| **Parent Retrieval (1-to-24)** | Top-1 Retrieval Accuracy | **77.78% (14/18)** |
+| **Parent Retrieval (1-to-24)** | Mean Reciprocal Rank (MRR) | **0.7884** |
 
 ---
 
 ## 📁 Repository Structure
 
-```
-kinship_project/
-├── app.py                      # Streamlit interactive web application
-├── test_photos/                # Sample test images (child.jpg, father.jpg, mother.jpg)
-├── weights/                    # Checkpoints directory
-│   ├── best_model.pt           # Best model checkpoint (highest val AUC/Acc)
-│   └── latest_model.pt         # Most recent training epoch checkpoint
-├── data/
-│   ├── raw/                    # Raw dataset directory (e.g., FIW)
-│   ├── aligned/                # MTCNN-aligned 160x160 face crops by Family/MID
-│   └── triplets.csv            # Extracted biological triads (father, mother, child)
+~~~text
+Kinship_project/
+├── app.py                      # 3-tab Streamlit web application
 ├── src/
 │   ├── __init__.py             # Package marker
-│   ├── model.py                # TriSubjectKinshipNet with Bilinear Genetic Fusion
-│   ├── dataset.py              # KinshipDataset, negative sampling & family-level split
-│   ├── train.py                # Two-stage training pipeline (warmup + fine-tuning)
-│   ├── evaluate.py             # Binary verification & 1-to-N Rank-K benchmarks
-│   ├── search_engine.py        # Vectorized 1-to-N gallery parent candidate search
+│   ├── model.py                # TriSubjectKinshipNet (symmetric 646-d fusion head)
+│   ├── dataset.py              # KinshipDataset, O(1) hard negative sampling & family split
+│   ├── train.py                # Two-stage AMP training pipeline (head warmup + top-block tuning)
+│   ├── evaluate.py             # TTA binary verification & 1-to-N Rank-K benchmarks
+│   ├── search_engine.py        # Vectorized TTA 1-to-N search & custom parent gallery manager
 │   ├── trait_analyzer.py       # Landmark-guided anatomical crop & trait attribution
-│   ├── align_faces.py          # MTCNN face alignment and caching utility
-│   └── build_fiw_triplets.py   # Triad generator from FIW relationship graphs
+│   ├── align_faces.py          # MTCNN 160x160 face alignment and caching utility
+│   └── build_fiw_triplets.py   # Open-wedge triad extractor from FIW relationship graphs
+├── .gitignore                  # Excludes venv/, data/, weights/, and cache artifacts
 ├── .python-version             # Python version specification (3.11.9)
 ├── requirements.txt            # Python dependencies
 └── README.md                   # Project documentation
-```
+~~~
+
+*(Local folders `data/`, `weights/`, and `venv/` are intentionally excluded via `.gitignore`.)*
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Prerequisites & Environment Setup
+### 1. Environment Setup
 
-Python **3.11+** with CUDA-enabled GPU (recommended) or CPU:
+Python **3.11** (e.g., `3.11.9` via `pyenv`) with an NVIDIA CUDA GPU (recommended) or CPU:
 
-```bash
+~~~bash
 # Clone the repository
 git clone https://github.com/Toothless-commits/Kinship_project.git
 cd Kinship_project
 
 # Create and activate virtual environment
 python3.11 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate        # Bash / Zsh
+# source venv/bin/activate.fish # Fish shell
+# venv\Scripts\activate         # Windows
 
-# Install dependencies
+# Install PyTorch (CUDA 12.1) and dependencies
 pip install --upgrade pip
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
-```
+~~~
 
-### 2. Launch the Streamlit Web Application
+### 2. Prepare Local Directories
 
-```bash
-streamlit run app.py
-```
+Create the untracked directories and place your trained checkpoint at `weights/best_model.pt` (or train one using the pipeline below):
+
+~~~bash
+mkdir -p data/raw/FIW data/aligned data/custom_gallery weights
+~~~
+
+### 3. Launch the Streamlit Web Application
+
+Disable the file watcher on Linux to avoid `inotify` watch-limit errors on large galleries:
+
+~~~bash
+streamlit run app.py --server.fileWatcherType none
+~~~
 
 Open `http://localhost:8501` in your browser:
-- **Tab 1: 1-to-1 Triplet Verification & Traits**:
-  Upload photos for Father, Mother, and Child (or test with images in `test_photos/`). The system outputs kinship confidence and displays side-by-side cropped landmarks with quantitative inheritance percentages.
-- **Tab 2: 1-to-N Parent Search**:
-  Upload an image of a child. The search engine scans the cached parental gallery and ranks candidate biological parents with confidence bars and previews.
+
+- **⚖️ Tab 1 — 1-to-1 Triplet Verification & Traits**: Upload Father, Mother, and Child photos to get TTA-boosted kinship confidence and side-by-side landmark trait inheritance percentages.
+- **🔍 Tab 2 — 1-to-N Parent Search**: Upload a child photo, choose **Custom Gallery Only**, **All Galleries**, or **FIW Dataset Only**, and rank the most probable biological parent couples.
+- **🖼️ Tab 3 — Parent Gallery Manager**: Enroll custom parent couples by uploading **1–3 photos per parent**. Faces are automatically MTCNN-aligned, saved in `data/custom_gallery/`, averaged into TTA prototypes, and indexed live in VRAM.
 
 ---
 
-## 💻 Command Line Usage
+## 🔄 End-to-End Training & Evaluation Pipeline
 
-### 1-to-N Parent Candidate Search
-Search and rank the most probable biological parents for any query child image:
+Download the **Kaggle FIW (`recognizing-faces-in-the-wild`)** dataset (`train_relationships.csv` and `train-faces/`) into `data/raw/FIW/`, then run:
 
-```bash
-python src/search_engine.py --child test_photos/child.jpg --top_k 5
-```
+### Step 1: Extract Open-Wedge Triads
 
-### Evaluate Model Performance
-Run binary verification benchmarks (Accuracy, ROC-AUC, Precision, Recall) and Rank-$K$ retrieval (Top-1, Top-5, MRR):
-
-```bash
-python src/evaluate.py \
-  --weights weights/best_model.pt \
-  --csv data/triplets.csv \
-  --aligned data/aligned \
-  --batch_size 16
-```
-
----
-
-## 🔄 End-to-End Pipeline
-
-### Step 1: Triplet Mining from Families in the Wild (FIW)
-Extract valid $(Father, Mother, Child)$ 3-cliques from FIW relationship metadata:
-
-```bash
+~~~bash
 python src/build_fiw_triplets.py \
   --raw_dir data/raw/FIW \
-  --out_csv data/triplets.csv
-```
+  --out_csv data/triplets.csv \
+  --max_combos 25
+~~~
 
-### Step 2: MTCNN Face Alignment & Normalization
-Crop and align all unique family member faces into standardized $160 \times 160$ px images:
+### Step 2: Align Faces with MTCNN
 
-```bash
+~~~bash
 python src/align_faces.py \
   --csv data/triplets.csv \
   --out_dir data/aligned \
   --img_size 160
-```
+~~~
 
-### Step 3: Two-Stage Model Training
-Train the network using a progressive fine-tuning strategy:
+### Step 3: Two-Stage Mixed-Precision Training
 
-```bash
+~~~bash
 python src/train.py \
-  --epochs_stage1 10 \
-  --epochs_stage2 15 \
-  --batch_size 16 \
+  --epochs_stage1 12 \
+  --epochs_stage2 10 \
+  --batch_size 32 \
   --save_dir weights
-```
+~~~
 
-- **Stage 1 (Classifier Warmup)**: InceptionResnetV1 backbone is frozen; only the 2560-d MLP classifier head is trained with AdamW ($\text{lr} = 10^{-3}$).
-- **Stage 2 (End-to-End Fine-Tuning)**: Backbone is unfrozen with differential learning rates:
-  - Backbone: $\text{lr} = 10^{-5}$ (preserves facial geometry)
-  - Classifier: $\text{lr} = 10^{-4}$
-  - Cosine annealing scheduler smoothly decays learning rates across epochs.
+- **Stage 1 (Frozen Backbone)**: Trains the `proj` bottleneck and `classifier` head with `AdamW` ($\text{lr} = 10^{-3}$, weight decay $10^{-2}$) and cosine annealing.
+- **Stage 2 (Selective Fine-Tuning)**: Unfreezes only `block8`, `last_linear`, and `last_bn` ($\text{lr} = 10^{-5}$) alongside the head ($\text{lr} = 10^{-4}$) with AMP mixed precision and gradient clipping (`max_norm = 1.0`).
+- **Negative Mining**: Strict 80/10/10 family-disjoint split with 1:1 positive/negative balance (`50%` wrong couple, `25%` wrong father, `25%` wrong mother).
+
+### Step 4: Evaluate Benchmarks
+
+~~~bash
+python src/evaluate.py \
+  --weights weights/best_model.pt \
+  --csv data/triplets.csv \
+  --aligned data/aligned \
+  --batch_size 32
+~~~
+
+### CLI 1-to-N Parent Search
+
+~~~bash
+python src/search_engine.py --child path/to/child.jpg --top_k 5 --source All
+~~~
 
 ---
 
-## 📊 Dataset & Negative Mining Strategy
+## 🛠️ Tech Stack
 
-To ensure genuine generalization, data partitioning occurs strictly at the **Family ID** level:
-- **80% Train / 10% Validation / 10% Test**: No family seen during training ever appears in validation or testing.
-- **Balanced Positive/Negative Pairs ($1:1$)**: For every true biological triad, an un-related negative triad is dynamically constructed:
-  - `wrong_father`: Correct mother and child, impostor father selected from another family.
-  - `wrong_mother`: Correct father and child, impostor mother selected from another family.
-  - `wrong_both`: Both parents replaced with candidates from an unrelated family.
-
----
-
-## 🛠️ Tech Stack & Dependencies
-
-- **Deep Learning Core**: [PyTorch](https://pytorch.org/), [Torchvision](https://pytorch.org/vision/stable/index.html)
-- **Face Recognition Backbone**: [facenet-pytorch](https://github.com/timesler/facenet-pytorch) (`InceptionResnetV1`, `MTCNN`)
-- **Data & Evaluation**: [Pandas](https://pandas.pydata.org/), [NumPy](https://numpy.org/), [scikit-learn](https://scikit-learn.org/), [Pillow](https://python-pillow.org/), [tqdm](https://github.com/tqdm/tqdm)
-- **Web App**: [Streamlit](https://streamlit.io/)
+- **Deep Learning**: [PyTorch](https://pytorch.org/), [Torchvision](https://pytorch.org/vision/stable/index.html)
+- **Face Backbone & Detection**: [facenet-pytorch](https://github.com/timesler/facenet-pytorch) (`InceptionResnetV1`, `MTCNN`)
+- **Data & Metrics**: [Pandas](https://pandas.pydata.org/), [NumPy](https://numpy.org/), [scikit-learn](https://scikit-learn.org/), [Pillow](https://python-pillow.org/), [tqdm](https://github.com/tqdm/tqdm)
+- **Interface**: [Streamlit](https://streamlit.io/)
 
 ---
 
@@ -237,4 +232,5 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 ## 🤝 Acknowledgments
 
 - [Families in the Wild (FIW)](https://web.northeastern.edu/smilelab/fiw/) for large-scale facial kinship benchmarks.
-- [facenet-pytorch](https://github.com/timesler/facenet-pytorch) by Tim Esler for PyTorch InceptionResnetV1 and MTCNN implementations.
+- [facenet-pytorch](https://github.com/timesler/facenet-pytorch) by Tim Esler for PyTorch `InceptionResnetV1` and `MTCNN`.
+```[cite: 6, 7]

@@ -3,12 +3,9 @@ venv/
 data/
 weights/
 test_photos/
-test_family/
-test_samples/
 __pycache__/
+*.py[cod]
 *.pt
 *.pth
 .streamlit/
-venv/
-weights/
-*.pt
+.pytest_cache/

@@ -1,23 +1,26 @@
 import random
+from collections import defaultdict
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 from torchvision import transforms
 
 
 def map_to_aligned_path(raw_path_str: str, aligned_root: Path) -> Path:
     p = Path(raw_path_str)
     parts = p.parts
-    f_idx = next(
-        i
-        for i, part in enumerate(parts)
-        if part.startswith("F") and len(part) >= 4 and part[1:].isdigit()
-    )
-    rel_path = Path(*parts[f_idx:])
-    return aligned_root / rel_path
+    try:
+        f_idx = next(
+            i
+            for i, part in enumerate(parts)
+            if part.startswith("F") and len(part) >= 4 and part[1:].isdigit()
+        )
+        return aligned_root / Path(*parts[f_idx:])
+    except StopIteration:
+        return p
 
 
 def split_families(
@@ -70,17 +73,24 @@ class KinshipDataset(Dataset):
         self.df = df.reset_index(drop=True)
         self.is_train = is_train
 
-        self.all_fathers = self.df["father_path"].tolist()
-        self.all_mothers = self.df["mother_path"].tolist()
-        self.family_ids = self.df["family_id"].tolist()
-        self.rng = random.Random(seed)
+        self.fam_fathers = defaultdict(list)
+        self.fam_mothers = defaultdict(list)
+        for _, row in self.df.iterrows():
+            fid = row["family_id"]
+            self.fam_fathers[fid].append(row["father_path"])
+            self.fam_mothers[fid].append(row["mother_path"])
+
+        self.unique_fams = sorted(self.fam_fathers.keys())
 
         if self.is_train:
             self.transform = transforms.Compose(
                 [
                     transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomAffine(
+                        degrees=8, translate=(0.04, 0.04), scale=(0.94, 1.06)
+                    ),
                     transforms.ColorJitter(
-                        brightness=0.15, contrast=0.15, saturation=0.1
+                        brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02
                     ),
                     transforms.RandomGrayscale(p=0.1),
                     transforms.ToTensor(),
@@ -102,6 +112,14 @@ class KinshipDataset(Dataset):
         with Image.open(path_str).convert("RGB") as img:
             return self.transform(img)
 
+    def _sample_impostor_family(self, target_fam: str, rand_gen) -> str:
+        if len(self.unique_fams) <= 1:
+            return target_fam
+        cand = rand_gen.choice(self.unique_fams)
+        while cand == target_fam:
+            cand = rand_gen.choice(self.unique_fams)
+        return cand
+
     def __getitem__(self, idx: int):
         is_positive = idx % 2 == 0
         triplet_idx = idx // 2
@@ -114,43 +132,18 @@ class KinshipDataset(Dataset):
 
         if not is_positive:
             rand_gen = random if self.is_train else random.Random(idx)
-            neg_type = rand_gen.choice(["wrong_father", "wrong_mother", "wrong_both"])
-
-            cand_f = [
-                f
-                for f, fam in zip(self.all_fathers, self.family_ids)
-                if fam != target_fam
-            ]
-            cand_m = [
-                m
-                for m, fam in zip(self.all_mothers, self.family_ids)
-                if fam != target_fam
-            ]
-
-            if neg_type == "wrong_father":
-                f_path = (
-                    rand_gen.choice(cand_f)
-                    if cand_f
-                    else rand_gen.choice(self.all_fathers)
-                )
-            elif neg_type == "wrong_mother":
-                m_path = (
-                    rand_gen.choice(cand_m)
-                    if cand_m
-                    else rand_gen.choice(self.all_mothers)
-                )
+            # Balanced negatives: 50% wrong couple, 25% wrong father, 25% wrong mother
+            r = rand_gen.random()
+            if r < 0.25:
+                neg_fam = self._sample_impostor_family(target_fam, rand_gen)
+                f_path = rand_gen.choice(self.fam_fathers[neg_fam])
+            elif r < 0.50:
+                neg_fam = self._sample_impostor_family(target_fam, rand_gen)
+                m_path = rand_gen.choice(self.fam_mothers[neg_fam])
             else:
-                f_path = (
-                    rand_gen.choice(cand_f)
-                    if cand_f
-                    else rand_gen.choice(self.all_fathers)
-                )
-                m_path = (
-                    rand_gen.choice(cand_m)
-                    if cand_m
-                    else rand_gen.choice(self.all_mothers)
-                )
-
+                neg_fam = self._sample_impostor_family(target_fam, rand_gen)
+                f_path = rand_gen.choice(self.fam_fathers[neg_fam])
+                m_path = rand_gen.choice(self.fam_mothers[neg_fam])
             label = 0.0
         else:
             label = 1.0
